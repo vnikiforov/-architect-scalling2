@@ -1,0 +1,97 @@
+services:
+  # Конфигурационный сервер
+  config:
+    container_name: config
+    image: mongo:4.2.24
+    command: mongod --configsvr --replSet configrs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - config_data:/data/db
+
+  # Шард 1
+  shard1:
+    container_name: shard1
+    image: mongo:4.2.24
+    command: mongod --shardsvr --replSet shard1rs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - shard1_data:/data/db
+
+  # Шард 2
+  shard2:
+    container_name: shard2
+    image: mongo:4.2.24
+    command: mongod --shardsvr --replSet shard2rs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - shard2_data:/data/db
+
+  # Mongos Router
+  mongos:
+    container_name: mongos
+    image: mongo:4.2.24
+    depends_on:
+      - config
+    command: mongos --configdb configrs/config:27017 --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    ports:
+      - "27017:27017"
+
+  # Инициализация кластера
+  init-cluster:
+    container_name: init-cluster
+    image: mongo:4.2.24
+    depends_on:
+      - config
+      - shard1
+      - shard2
+      - mongos
+    volumes:
+      - ./scripts:/scripts
+    command: >
+      bash -c "
+        echo 'Waiting for services to start...'
+        sleep 45
+        echo 'Initializing config replica set...'
+        mongo --host config:27017 /scripts/init-config.js
+        sleep 10
+        echo 'Initializing shard1 replica set...'
+        mongo --host shard1:27017 /scripts/init-shard1.js
+        sleep 10
+        echo 'Initializing shard2 replica set...'
+        mongo --host shard2:27017 /scripts/init-shard2.js
+        sleep 10
+        echo 'Adding shards to cluster...'
+        mongo --host mongos:27017 /scripts/init-sharding.js
+        echo 'Cluster initialization completed!'
+      "
+
+  # Приложение
+  pymongo_api:
+    container_name: pymongo_api
+    build: 
+      context: api_app
+      dockerfile: Dockerfile
+    depends_on:
+      - mongos
+      - init-cluster
+    ports:
+      - "8080:8080"
+    environment:
+      MONGODB_URL: "mongodb://mongos:27017"
+      MONGODB_DATABASE_NAME: "somedb"
+    networks:
+      - mongo-network
+
+volumes:
+  config_data:
+  shard1_data:
+  shard2_data:
+
+networks:
+  mongo-network:
+    driver: bridge

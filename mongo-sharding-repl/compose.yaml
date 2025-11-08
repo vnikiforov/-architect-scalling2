@@ -1,0 +1,139 @@
+name: "mongo-sharding-repl"
+
+services:
+  config:
+    container_name: config
+    image: mongo:4.2.24
+    command: mongod --configsvr --replSet configrs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - config_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongo", "--host", "config", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+      start_period: 60s
+
+  init-config:
+    container_name: init-config
+    image: mongo:4.2.24
+    depends_on:
+      config:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts
+    command: 
+      - "bash"
+      - "-c"
+      - |
+        echo "Waiting for config server..."
+        sleep 30
+        echo "Initializing config replica set..."
+        mongo --host config:27017 /scripts/init-config.js
+        echo "Config initialization completed"
+    networks:
+      - mongo-network
+    restart: on-failure
+
+  shard1:
+    container_name: shard1
+    image: mongo:4.2.24
+    command: mongod --shardsvr --replSet shard1rs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - shard1_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongo", "--host", "shard1", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+      start_period: 60s
+
+  shard2:
+    container_name: shard2
+    image: mongo:4.2.24
+    command: mongod --shardsvr --replSet shard2rs --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    volumes:
+      - shard2_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongo", "--host", "shard2", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
+      start_period: 60s
+
+  mongos:
+    container_name: mongos
+    image: mongo:4.2.24
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+    command: mongos --configdb configrs/config:27017 --bind_ip_all --port 27017
+    networks:
+      - mongo-network
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongo", "--host", "mongos", "--eval", "db.runCommand({ping:1})"]
+      interval: 15s
+      timeout: 30s
+      retries: 20
+      start_period: 90s
+    restart: unless-stopped
+
+  init-cluster:
+    container_name: init-cluster
+    image: mongo:4.2.24
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+      shard1:
+        condition: service_healthy
+      shard2:
+        condition: service_healthy
+      mongos:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts
+    command: 
+      - "bash"
+      - "-c"
+      - |
+        /scripts/init-cluster.sh
+    networks:
+      - mongo-network
+
+  api:
+    build: ./api_app
+    container_name: api
+    ports:
+      - "8080:8080"
+    networks:
+      - mongo-network
+    depends_on:
+      mongos:
+        condition: service_healthy
+      init-cluster:
+        condition: service_completed_successfully
+    environment:
+      - MONGO_URI=mongodb://mongos:27017
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  config_data:
+  shard1_data:
+  shard2_data:
+
+networks:
+  mongo-network:
+    driver: bridge
